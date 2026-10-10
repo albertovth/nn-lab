@@ -42,7 +42,7 @@ With the virtual environment active, start the interactive app:
 python -m streamlit run nok_neural_network.py
 ```
 
-Streamlit prints the local URL to open in a browser. The app lets you inspect the monthly data, the decision boundary, individual neurons, and the training process. Its controls change the amount of input history, network size, weight penalty, maximum learning rate, training length, and displayed epoch. The NumPy code tab explains each step of the learning algorithm.
+Streamlit prints the local URL to open in a browser. The app lets you inspect the monthly data, the decision boundary, individual neurons, and the training process. Its controls change the amount of input history, recent EUR/NOK movement summary, network size, weight penalty, maximum learning rate, training length, and displayed epoch. The NumPy code tab explains each step of the learning algorithm.
 
 For a smaller, standalone experiment instead:
 
@@ -68,6 +68,8 @@ For offline use, download both files and place them beside the Python scripts. L
 Daily observations are averaged by calendar month. For month *t*, the two base inputs are the average policy rate and the percentage change in monthly-average EUR/NOK from the previous month. The target is whether monthly-average EUR/NOK rises in month *t + 1* (a weaker NOK against the euro). The current, incomplete month and months without complete inputs and target are excluded.
 
 The network starts with two current-month inputs. A slider can add the policy rate and EUR/NOK change from each of the previous one to three months, giving up to eight inputs. This adds history without using any information from the target month. It is an input-history experiment, not an attention mechanism.
+
+A second slider can add the mean and standard deviation of EUR/NOK monthly percentage changes over the most recent three or six months, including the current month. These summarize recent direction and variability. The features are calculated from information available by the end of each input month. The app uses the same eligible observations for every combination of history and summary settings.
 
 The network has one ReLU hidden layer and a sigmoid output. It is trained with full-batch gradient descent and binary cross-entropy. The optional L2 weight penalty discourages large weights. The learning-rate slider sets the maximum step: if an update raises the training objective, the app halves the step and retries. The earlier 80% of usable months are used for training; the later 20% are used for comparison. Input scaling is estimated from the training period only. The same eligible months and split are used for every history setting. It also shows two simple benchmarks: always predict the outcome most common in training, and predict the same direction as the current month. A button runs three expanding-window validation folds entirely within the earlier training period. Adding complexity is not guaranteed to improve accuracy.
 

@@ -23,6 +23,7 @@ EUR_URL = REPOSITORY + "no_exchangeRates.csv"
 FEATURE_NAMES = ("Policy rate (%)", "EUR/NOK change this month (%)")
 BASE_FEATURE_COLUMNS = ("rate_pct", "current_change_pct")
 MAX_HISTORY_MONTHS = 3
+MOVEMENT_WINDOWS = (0, 3, 6)
 HERE = Path(__file__).resolve().parent
 
 
@@ -88,13 +89,28 @@ def add_history_features(monthly):
     return monthly
 
 
-def selected_features(history_months):
+def add_movement_features(monthly):
+    """Summarize changes known by the end of each month."""
+    monthly = monthly.copy()
+    for window in MOVEMENT_WINDOWS[1:]:
+        changes = monthly["current_change_pct"].rolling(window, min_periods=window)
+        monthly[f"eur_trend_{window}m"] = changes.mean()
+        monthly[f"eur_volatility_{window}m"] = changes.std(ddof=0)
+    return monthly
+
+
+def selected_features(history_months, movement_window=0):
     columns = list(BASE_FEATURE_COLUMNS)
     names = list(FEATURE_NAMES)
     for lag in range(1, history_months + 1):
         when = "previous month" if lag == 1 else f"{lag} months earlier"
         columns.extend((f"rate_pct_lag{lag}", f"current_change_pct_lag{lag}"))
         names.extend((f"Policy rate, {when} (%)", f"EUR/NOK change, {when} (%)"))
+    if movement_window:
+        columns.extend((f"eur_trend_{movement_window}m",
+                        f"eur_volatility_{movement_window}m"))
+        names.extend((f"EUR/NOK mean monthly change, last {movement_window} months (%)",
+                      f"EUR/NOK change volatility, last {movement_window} months (%)"))
     return columns, names
 
 
@@ -205,6 +221,7 @@ def series_plot(series, ylabel):
     low, high = float(values.min()), float(values.max())
     padding = 0.08 * (high - low) if high > low else max(abs(low) * 0.08, 0.1)
     ax.set_ylim(low - padding, high + padding)
+    ax.set_xlim(values.index.min(), values.index.max())
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.2)
     fig.autofmt_xdate()
@@ -212,15 +229,34 @@ def series_plot(series, ylabel):
     return fig
 
 
-def decision_plot(X_raw, y, train_cut, mean, scale, weights, selected):
+def decision_mesh(X_raw, selected, xx, yy, feature_columns, movement_window):
+    """Vary two current inputs while keeping the chosen month's past fixed."""
+    mesh = np.tile(X_raw[selected], (xx.size, 1))
+    mesh[:, 0], mesh[:, 1] = xx.ravel(), yy.ravel()
+    if movement_window:
+        trend_index = feature_columns.index(f"eur_trend_{movement_window}m")
+        volatility_index = feature_columns.index(f"eur_volatility_{movement_window}m")
+        chosen_change = X_raw[selected, 1]
+        chosen_mean = X_raw[selected, trend_index]
+        chosen_volatility = X_raw[selected, volatility_index]
+        past_sum = movement_window * chosen_mean - chosen_change
+        past_squares = (movement_window * (chosen_volatility**2 + chosen_mean**2)
+                        - chosen_change**2)
+        new_mean = (past_sum + mesh[:, 1]) / movement_window
+        new_variance = (past_squares + mesh[:, 1]**2) / movement_window - new_mean**2
+        mesh[:, trend_index] = new_mean
+        mesh[:, volatility_index] = np.sqrt(np.maximum(new_variance, 0))
+    return mesh
+
+
+def decision_plot(X_raw, y, train_cut, mean, scale, weights, selected,
+                  feature_columns, movement_window):
     fig, ax = plt.subplots(figsize=(8.0, 5.2))
     xmin, xmax = np.quantile(X_raw[:, 0], [0.01, 0.99]); xmin -= 0.5; xmax += 0.5
     ymin, ymax = np.quantile(X_raw[:, 1], [0.01, 0.99]); ymin -= 0.65; ymax += 0.65
     xx, yy = np.meshgrid(np.linspace(xmin, xmax, 110), np.linspace(ymin, ymax, 110))
-    # For a history model, show a two-dimensional slice through the selected
-    # month's other inputs. The dots retain their own actual histories.
-    mesh = np.tile(X_raw[selected], (xx.size, 1))
-    mesh[:, 0], mesh[:, 1] = xx.ravel(), yy.ravel()
+    # Past inputs stay fixed; current-derived summaries follow the grid value.
+    mesh = decision_mesh(X_raw, selected, xx, yy, feature_columns, movement_window)
     probs = class_probability((mesh - mean) / scale, weights).reshape(xx.shape)
     surf = ax.contourf(xx, yy, probs, levels=np.linspace(0, 1, 11), cmap="RdYlBu_r", alpha=0.49)
     if np.min(probs) < 0.5 < np.max(probs):
@@ -308,6 +344,11 @@ with st.sidebar:
     history_months = st.slider("Previous months of inputs", 0, MAX_HISTORY_MONTHS, 0,
                                help="Add the policy rate and EUR/NOK change from each previous month. "
                                     "The same observations are used for every setting, so test results can be compared.")
+    movement_window = st.select_slider("Recent EUR/NOK summary",
+                                        options=MOVEMENT_WINDOWS, value=0,
+                                        format_func=lambda months: "Off" if months == 0 else f"{months} months",
+                                        help="Add the average monthly EUR/NOK change and its volatility "
+                                             "over the chosen window. Only current and past months are used.")
     hidden = st.slider("Hidden neurons", 2, 16, 8)
     penalty = st.slider("Weight penalty (L2)", 0.0, 0.10, 0.0, 0.005,
                         help="Discourages large weights. Zero turns it off. "
@@ -330,12 +371,15 @@ except Exception as exc:
     st.markdown(f"[Policy rate CSV]({RATE_URL}) · [EUR/NOK CSV]({EUR_URL})")
     st.stop()
 
-monthly = make_monthly(rate_daily, eur_daily)
+monthly = add_movement_features(make_monthly(rate_daily, eur_daily))
 monthly = monthly.loc[monthly.index.year >= start_year].copy()
 monthly = add_history_features(monthly)
 all_feature_columns, _ = selected_features(MAX_HISTORY_MONTHS)
-feature_columns, feature_names = selected_features(history_months)
-# Keep the same eligible months and train/test split for all history settings.
+for window in MOVEMENT_WINDOWS[1:]:
+    all_feature_columns.extend((f"eur_trend_{window}m",
+                                f"eur_volatility_{window}m"))
+feature_columns, feature_names = selected_features(history_months, movement_window)
+# Keep the same eligible months and split for every feature setting.
 model_rows = monthly[all_feature_columns + ["next_change_pct",
                       "depreciates_next_month"]].dropna().copy()
 if len(model_rows) < 40:
@@ -357,7 +401,8 @@ snapshots, losses, step_sizes = train_network(X[:cut], Y[:cut], epochs, lr, hidd
 st.caption(f"{len(X)} months ({model_rows.index.min():%b %Y}–{model_rows.index.max():%b %Y}); "
            f"{cut} earlier months for training, {len(X)-cut} later months for testing. "
            f"{len(feature_columns)} inputs from the current month and {history_months} previous month(s). "
-           "The same months are used for every history setting. Data source: Norges Bank, republished by frefrik.")
+           f"Recent EUR/NOK summary: {'off' if movement_window == 0 else f'{movement_window} months'}. "
+           "The same months are used for every feature setting. Data source: Norges Bank, republished by frefrik.")
 
 bar_left, bar_right = st.columns([1.4, 1])
 with bar_left:
@@ -392,6 +437,14 @@ view_data, view_boundary, view_neuron, view_learning, view_code = st.tabs(
 with view_data:
     st.write("Each dot used by the network is a month. Inputs use information available "
              "at the **end of that month**. The label tells us what happened **the following month**.")
+    st.caption(f"The two charts show observed monthly data through {monthly.index.max():%B %Y}.")
+    st.caption("The table stops before the latest complete input month because that month's "
+               "following-month outcome is not known yet. The rate values shown are observations, "
+               "not rate forecasts.")
+    if movement_window:
+        st.write(f"The {movement_window}-month summary adds two inputs: the average of the monthly "
+                 "EUR/NOK percentage changes and their standard deviation. It includes the selected "
+                 "month and earlier months only. Higher volatility means the recent changes varied more.")
     a, b = st.columns(2)
     with a:
         st.markdown("**EUR/NOK (NOK per euro)**")
@@ -417,11 +470,12 @@ with view_boundary:
                 "NOK will weaken. On the **blue side**, it is below 50%, so the model predicts NOK will "
                 "strengthen or stay level. The black line itself is exactly 50%. "
                 "Circles are training months; crosses are later months.")
-    if history_months:
-        st.caption("With history enabled, this is a two-input slice: past-month inputs are held at the selected "
-                   "month's values. Each plotted month has its own history, so its dot may have a different "
-                   "prediction from the background color at that position.")
-    fig = decision_plot(X_raw, Y_all, cut, mean, scale, w, month_index)
+    if history_months or movement_window:
+        st.caption("This is a two-axis slice: past-month inputs are held at the selected month's values, "
+                   "while recent-movement summaries follow the current-month change on the vertical axis. "
+                   "Each dot has its own past, so its prediction may differ from the background at that position.")
+    fig = decision_plot(X_raw, Y_all, cut, mean, scale, w, month_index,
+                        feature_columns, movement_window)
     st.pyplot(fig, width="stretch"); plt.close(fig)
     st.caption("The selected month is marked by a star. Changing the epoch slider shows how the learned surface changes.")
 
@@ -525,7 +579,7 @@ with view_learning:
     st.write(f"**Simple benchmarks on the later months:** training-majority "
              f"**{majority_baseline:.1%}**; predict the same direction as the current month "
              f"**{persistence_baseline:.1%}**. Both rules can be applied without seeing the later labels.")
-    if history_months:
+    if history_months or movement_window:
         # Compare on identical months, split and training settings; only the
         # additional inputs differ. Neither model is selected on test results.
         current_raw = model_rows[list(BASE_FEATURE_COLUMNS)].to_numpy(dtype=float)
@@ -539,7 +593,7 @@ with view_learning:
                                                  current_snapshots[shown_epoch]) >= 0.5)
         current_test_acc = (current_predictions == Y_all[cut:]).mean()
         st.write(f"**Same-month comparison:** current-month inputs alone: **{current_test_acc:.1%}** "
-                 f"later-period accuracy; with {history_months} previous month(s): **{test_acc:.1%}**. "
+                 f"later-period accuracy; with the chosen extra inputs: **{test_acc:.1%}**. "
                  "Adding inputs can reduce accuracy, especially with a small sample.")
     st.caption("Trying many settings against the same later period uses it for model selection. "
                "The best observed score is exploratory and needs a fresh period for independent evaluation.")
@@ -559,7 +613,8 @@ with view_learning:
                           "Sample": np.where(np.arange(len(X)) < cut, "Training", "Later/test")})
     st.dataframe(chart.tail(36), hide_index=True, width="stretch", row_height=42)
     st.caption("With small time-series datasets, a network can fit the training period without "
-               "predicting unseen months. Try different input histories, hidden neurons and learning rates.")
+               "predicting unseen months. Try different input histories, recent-movement summaries, "
+               "hidden neurons and learning rates.")
 
 with view_code:
     st.markdown("**This is the core learning algorithm in the app.** It uses NumPy, "
