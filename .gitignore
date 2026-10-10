@@ -1,0 +1,33 @@
+# Python environments and generated files
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local settings and credentials
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.streamlit/config.toml
+.agents/
+.idea/
+.vscode/
+
+# Optional local copies of the external data
+no_keyPolicyRate.csv
+no_exchangeRates.csv
+nok_monthly_network_data.csv
+
+# Logs and operating-system files
+*.log
+.DS_Store
+Thumbs.db
